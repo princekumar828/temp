@@ -1,0 +1,96 @@
+This **"Hybrid Interaction"** model (often called the **"Deep Zoom"** or **"Overview-to-Detail"** pattern) is the gold standard for engineering analytics. It solves the physical limitation of the browser: showing *billions* of points for context, but switching to *millions* for analysis.
+
+Here is the architectural blueprint for implementing this **Hybrid "Image-to-Vector" Pipeline** in your system.
+
+### The Core Concept: "Count-Based Switching"
+
+You do not choose between Server Rendering and Client Rendering. You use **both**, switching dynamically based on the number of data points in the current viewport.
+
+### 1. The Threshold Logic
+
+You need a "Traffic Controller" on Server X. Every time the user pans or zooms, the client sends the new Viewport Coordinates to the server.
+
+* **Rule:** If `Count > 50,000` (adjustable)  Return **Image** (Server Render).
+* **Rule:** If `Count <= 50,000`  Return **Vector Data** (Client Render).
+
+---
+
+### 2. State A: The Macro View (The "Heatmap" Mode)
+
+When the user is looking at a full wafer (100M+ defects) or a full year of data.
+
+* **Frontend (Server Y / Client):**
+* The chart component is just a simple `<img>` tag (or an HTML5 Canvas drawing a texture).
+* User Interaction: Panning/Zooming updates the coordinate bounds and requests a new image URL (e.g., `/api/render?xMin=0&xMax=100...`).
+
+
+* **Backend (Server X):**
+* **Technology:** You need a high-performance rasterizer.
+* **Option A (C#):** Use **SkiaSharp**. It can draw 1M points into a 1024x1024 PNG in about 200ms.
+* **Option B (Python - Recommended):** If your data backend supports Python, use **Datashader**. It is specifically optimized to aggregate *billions* of points into a PNG in milliseconds using GPU/Numba.
+
+
+* **Output:** A standard PNG/JPEG heatmap.
+
+
+
+### 3. State B: The Micro View (The "Interactive" Mode)
+
+When the user zooms into a specific "Die" or "Reticle Field" to inspect clusters.
+
+* **The Switch:**
+1. User zooms in.
+2. Server X calculates that only 20,000 points exist in this box.
+3. Server X responds: `{ "mode": "vector", "streamUrl": "..." }`.
+4. **Frontend:** Hides the `<img>` and initializes the **WebGL Context**.
+5. **Frontend:** Connects to the gRPC stream and renders the live dots.
+
+
+* **Interaction:** Now, hovering works. Lasso selection works. You are interacting with raw GPU memory.
+
+---
+
+### 4. Implementation Details: "The Seamless Handoff"
+
+The trick to making this feel "premium" is hiding the switch.
+
+1. **The Overlay Technique:**
+Always keep the "Last Good Image" visible as a background layer.
+```html
+<div class="chart-container">
+    <img src="@CurrentImageUrl" style="position:absolute; width:100%; height:100%;" />
+
+    <canvas id="webgl-layer" style="position:absolute; width:100%; height:100%; opacity: @(IsVectorMode ? 1 : 0);"></canvas>
+</div>
+
+```
+
+
+2. **The "Loading" State:**
+When the user zooms, don't show a spinner. Keep the old image stretched (pixelated) until the new, sharper image (or vector data) arrives. This is how Google Maps works.
+
+---
+
+### 5. Summary of Responsibilities
+
+| Layer | Responsibility | Technology |
+| --- | --- | --- |
+| **Server X** | **Query Engine:** Counts points in viewport.<br>
+
+<br>**Rasterizer:** Generates PNGs if Count > Threshold.<br>
+
+<br>**Streamer:** Sends Binary Arrow if Count < Threshold. | **C# SkiaSharp** or **Python Datashader** |
+| **Server Y** | **Proxy:** Forwards requests (keeps API keys hidden).<br>
+
+<br>**State:** Tracks "Current Viewport" in C#. | **Blazor / ASP.NET Core** |
+| **Client** | **Manager:** Decides whether to show `<img>` or `<canvas>`.<br>
+
+<br>**Renderer:** WebGL (Regl) for the interactive phase. | **Blazor WASM + JS Interop** |
+
+### Why this is perfect for KLA
+
+This architecture allows a user to load a **Full Wafer Map (100M points)** in **0.5 seconds** (because it's just a PNG) but still allows them to zoom in and **lasso-select specific defects** (because it switches to WebGL). It gives you the performance of a static image with the power of a dynamic tool.
+
+... [What Every .NET Developer NEEDS to Know About Blazor Render Modes!](https://www.youtube.com/watch?v=Ad6oFOQY36c)
+
+This video is highly relevant because it explains how to properly configure the render modes (switching between static server rendering and interactive client rendering) which is critical for implementing this hybrid chart architecture.
