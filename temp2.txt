@@ -1,0 +1,123 @@
+This architecture is known as the **"Overview-plus-Detail" Hybrid Engine**. It is the standard pattern used by tools like Google Earth, Uber Kepler.gl, and high-end EDA (Electronic Design Automation) tools to handle scale limitations.
+
+The central philosophy is: **"Pixels are cheap; Vectors are expensive."**
+
+Here is the deep-dive technical specification for implementing this at KLA.
+
+### 1. The Architectural Logic (The "Switch")
+
+You are building a system that treats "Big Data" as an **Image** until it becomes small enough to treat as **Data**.
+
+#### The "Traffic Controller" (Server X)
+
+Your Data API (Server X) needs a middleware layer that intercepts every viewport request.
+
+* **Input:** Viewport Bounds (`xMin`, `xMax`, `yMin`, `yMax`).
+* **Logic:** Run a `COUNT(*)` query (or check a pre-computed histogram).
+* **Decision:**
+* **Case A (Count > 50,000):** Calls the **Rasterizer Service**. Returns a PNG URL.
+* **Case B (Count <= 50,000):** Calls the **Data Service**. Returns a Binary Stream (Apache Arrow).
+
+
+
+---
+
+### 2. Component A: The Rasterizer (Server X)
+
+This component generates the "Heatmap" or "Density Plot" for the macro view.
+
+* **Technology Choice:**
+* **Python (Recommended):** Use **Datashader**. It is the industry standard for this. It can aggregate 1 billion points into a PNG in <500ms using Numba/GPU.
+* **C# (.NET):** Use **SkiaSharp** or **ImageSharp**. You must implement "Binning" logic manually (mapping  to pixel buckets).
+
+
+* **The Output:** A standard PNG/JPEG.
+* **Optimization:** **Tile Caching**.
+* Don't just generate random crops. Divide the world into a quad-tree grid of tiles (Level 0 = 1 tile, Level 1 = 4 tiles...).
+* If a user asks for "Wafer Center," stitch together the cached tiles  and  instead of re-calculating. This makes panning **instant**.
+
+
+
+### 3. Component B: The Compositor (Client / Blazor)
+
+This is the frontend component that layers the Image and the WebGL Canvas. They must overlap perfectly.
+
+```html
+<div class="viewport-container" style="position: relative; width: 100%; height: 100%;">
+    
+    <img src="@RasterUrl" 
+         style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain; transition: opacity 0.3s;" />
+
+    <canvas id="gl-canvas" 
+            style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; opacity: @(IsVectorMode ? 1 : 0); pointer-events: @(IsVectorMode ? 'auto' : 'none');">
+    </canvas>
+
+</div>
+
+```
+
+**The "Seamless" Transition:**
+
+1. **Start:** User sees `<img>` (Heatmap).
+2. **Zoom:** User zooms in. The browser stretches the `<img>` (it gets pixelated/blurry, preserving context).
+3. **Fetch:** Background gRPC call fetches vector data for the new viewport.
+4. **Draw:** WebGL draws the sharp dots on the `<canvas>`.
+5. **Swap:** The `<canvas>` fades to `opacity: 1`. The `<img>` fades to `0`. The user barely notices the switch—they just see the chart "sharpen."
+
+---
+
+### 4. The Mathematical "Handshake" (Coordinate Sync)
+
+This is the hardest part. You must ensure the Server's PNG and the Client's WebGL align perfectly. If they are off by 1 pixel, the defect locations will "jump" when you switch modes.
+
+You must share a **Coordinate System** strategy.
+
+**The Normalization Formula:**
+Both Server X and Client Y should agree to convert raw data (e.g., Wafer Microns) into **Normalized Device Coordinates (NDC)** ranging from `-1.0` to `+1.0`.
+
+* **Server X (Generating PNG):**
+Maps `DataX`  `PixelX` (0 to 1024).
+
+
+* **Client Y (WebGL):**
+Maps `DataX`  `GL_Position` (-1 to +1).
+
+
+
+**Critical Rule:** The `ViewportMin/Max` sent to the Server **must** match the `Uniforms` sent to the WebGL shader exactly.
+
+---
+
+### 5. Interaction Implementation (Lasso & Hover)
+
+* **In "Raster Mode" (Image):**
+* **Hover:** You cannot hover over individual points.
+* **Selection:** The "Lasso" tool draws a visual line on the screen, but it acts as a **Zoom Trigger**. When the user releases the lasso, you zoom into that specific rectangle (triggering the switch to Vector Mode).
+
+
+* **In "Vector Mode" (WebGL):**
+* **Hover:** Use a **Quadtree** (built in C# WASM) to find the nearest point to the mouse cursor.
+* **Selection:** The "Lasso" tool filters the `Float32Array` on the GPU. You highlight selected points by changing their color in the vertex buffer.
+
+
+
+### 6. Summary of Technologies for This Stack
+
+| Layer | Responsibility | Recommended Tech |
+| --- | --- | --- |
+| **Server X** | Image Generation (Macro View) | **Python + Datashader** (Best) OR **C# + SkiaSharp** |
+| **Transport** | Moving Data | **gRPC-Web (Apache Arrow)** |
+| **Client** | Vector Rendering (Micro View) | **Blazor WASM + Regl (WebGL Wrapper)** |
+| **State** | Coordinate Sync | **C# Class** (Shared Logic) |
+
+### Why this works for KLA
+
+KLA engineers need to find a single "Killer Defect" among millions.
+
+* The **Image** layer guides them to the "Cluster" (the red blob on the heatmap).
+* The **Vector** layer lets them click the specific "Killer Defect" to see its ID and SEM Image.
+* You save 90% of bandwidth because you never download the "noise" (the millions of safe points).
+
+... [Blazor Performance Best Practices](https://www.google.com/search?q=https://www.youtube.com/watch%3Fv%3DkhQZ3eG8Cq0)
+
+This video is relevant as it dives into specific techniques for optimizing Blazor WebAssembly performance, including JS interop and component lifecycle management which are critical for the "Compositor" layer of your architecture.
