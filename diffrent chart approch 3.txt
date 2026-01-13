@@ -1,0 +1,98 @@
+Here is the breakdown of exactly how to handle each of those specific charts within your **FastAPI + Blazor** architecture.
+
+I noticed you mentioned "Burrito" chart—I assume you meant **Pareto Chart** (which you mentioned earlier).
+
+The key rule is: **Do not use the same hammer for every nail.**
+
+* **Use Datashader/WebGL** for raw data (millions of points).
+* **Use Aggregation (Python)** for statistical summaries (Box, Bar, Pareto).
+
+Here is the strategy for your requested list:
+
+### 1. Scatter Plot & Scatter Matrix
+
+**Strategy:** **The Hybrid Engine (Datashader  WebGL)**
+This is the primary use case for the architecture we designed.
+
+* **The Problem:** Millions of overlapping points.
+* **The Implementation:**
+* **Zoom Level 0 (Overview):** FastAPI uses **Datashader** to generate a Heatmap Image.
+* **Zoom Level 10 (Detail):** When point count < 50k, FastAPI switches to streaming **Apache Arrow** vectors. Blazor renders them in **WebGL**.
+
+
+* **Why:** It is the only way to visualize 100M points without crashing the browser.
+
+### 2. Histogram
+
+**Strategy:** **Server-Side Binning**
+
+* **The Problem:** You have 100M values. You cannot send them to the browser to sort and bin.
+* **The Implementation:**
+* **FastAPI:** Uses `numpy.histogram()` or DuckDB to calculate the bins in milliseconds.
+* **Payload:** You send a tiny JSON array: `[{ "bin": "0-10", "count": 500 }, { "bin": "10-20", "count": 1200 }]`.
+* **UI:** Render this using a standard, lightweight library like **ApexCharts** or **Plotly.Blazor**.
+
+
+* **Why:** Sending the bins is 1,000,000x smaller than sending the raw data.
+
+### 3. Box Plot
+
+**Strategy:** **Server-Side Statistics**
+
+* **The Problem:** A Box Plot summarizes distribution (Median, Quartiles, Outliers).
+* **The Implementation:**
+* **FastAPI:** Calculates the 5 key numbers: `Min, Q1, Median, Q3, Max`.
+* **Outliers:** Only fetch the "Outlier" points explicitly (if there are too many, use Datashader for the outlier strip).
+* **UI:** Use **Plotly.Blazor**. It accepts the pre-calculated quartiles directly.
+
+
+* **Why:** Never send raw data for a box plot. The browser should just draw 5 lines.
+
+### 4. Pareto Chart (The "Burrito")
+
+**Strategy:** **Top-N Aggregation**
+
+* **The Problem:** Visualizing the "80/20" rule for defect types.
+* **The Implementation:**
+* **FastAPI:** Groups data by Category. Sorts descending. Keeps the Top 10. Groups the remaining 5,000 categories into "Others."
+* **Payload:** Small JSON: `[{ "label": "Particle", "count": 800 }, { "label": "Scratch", "count": 150 }...]`.
+* **UI:** Use **ApexCharts** (Combo Chart: Bar + Line).
+
+
+* **Why:** Rendering 5,000 tiny bars is useless. The aggregation must happen in Python.
+
+### 5. Line / Trend Chart
+
+**Strategy:** **The M4 Algorithm (Data Reduction)**
+
+* **The Problem:** A sensor log with 5 million timestamps.
+* **The Implementation:**
+* **FastAPI:** Runs the **M4 Algorithm** (or LTTB). It reduces 5M points to ~2,000 points while preserving the visual peaks and valleys perfectly.
+* **UI:** Render using **QuickChart** or **WebGL Line**.
+
+
+* **Why:** Drawing 5 million lines overlaps pixels and wastes CPU. The M4 algorithm makes it look identical but loads instantly.
+
+### 6. Bar Chart
+
+**Strategy:** **Simple Aggregation**
+
+* **The Problem:** Comparing counts (e.g., Defects per Wafer).
+* **The Implementation:** Standard SQL/Pandas `GROUP BY`.
+* **UI:** Any standard Blazor chart library (Syncfusion, Radzen, Apex).
+
+---
+
+### Summary Table: Which Tech for Which Chart?
+
+| Chart Type | Where is the Logic? | Transport Format | Rendering Tech |
+| --- | --- | --- | --- |
+| **Scatter / Matrix** | **Datashader** (Img) / **Raw** (Vec) | PNG Image  Arrow Stream | **Hybrid** (Image + WebGL) |
+| **Box Plot** | **Pandas/DuckDB** (Calc Quartiles) | JSON (5 numbers) | **Plotly / Apex** (SVG) |
+| **Pareto** | **Pandas** (Group & Sort) | JSON (Top 20 rows) | **Plotly / Apex** (SVG) |
+| **Histogram** | **Numpy** (Calc Bins) | JSON (Bin Counts) | **Plotly / Apex** (SVG) |
+| **Trend Line** | **M4 Algorithm** (Downsample) | Binary / JSON Array | **Canvas / WebGL** |
+
+**Recommendation:**
+Focus your complex engineering efforts (FastAPI + Datashader) **only on the Scatter Plots**.
+For the Box, Pareto, and Bar charts, just write simple Python queries that return small JSONs, and use a standard off-the-shelf Blazor library to draw them. They don't need the heavy machinery.
